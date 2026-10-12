@@ -82,6 +82,7 @@ const state = {
   sort: "name",
   savedOnly: false,
   saved: new Set(),
+  group: "",
 };
 
 const $ = (id) => document.getElementById(id);
@@ -268,7 +269,7 @@ function buildDishes() {
 /* ---------------- filters ---------------- */
 
 function matchesText(r, needle) {
-  const hay = [r.name, r.town, r.signature, r.blurb, ...r.dishes.map((d) => d.name + " " + d.note)]
+  const hay = [r.name, r.town, (CATEGORIES[r.category] || {}).label, r.signature, r.blurb, ...r.dishes.map((d) => d.name + " " + d.note)]
     .join(" ")
     .toLowerCase();
   return hay.includes(needle.toLowerCase());
@@ -392,7 +393,17 @@ function cardHTML(r) {
 
 function render() {
   const list = getVisible();
-  els.grid.innerHTML = list.map(cardHTML).join("");
+  const groupKey = { category: (r) => CATEGORIES[r.category].label, town: (r) => r.town }[state.group];
+  let html = "";
+  if (groupKey) {
+    list.sort((a, b) => groupKey(a).localeCompare(groupKey(b))); // stable: keeps the chosen sort inside groups
+    let last;
+    for (const r of list) {
+      if (groupKey(r) !== last) html += `<h3 class="group__title">${esc((last = groupKey(r)))}</h3>`;
+      html += cardHTML(r);
+    }
+  } else html = list.map(cardHTML).join("");
+  els.grid.innerHTML = html;
   els.empty.hidden = list.length > 0;
 
   const parts = [];
@@ -489,6 +500,8 @@ function openSheet(id) {
       <div class="sheet__actions">
         <button class="btn btn--leaf btn--save" type="button" data-save="${r.id}" aria-pressed="${saved}">${saved ? "Saved" : "Save this place"}</button>
         <button class="btn btn--outline" type="button" data-share="${r.id}">Copy name and town</button>
+        <button class="btn btn--outline" type="button" data-edit="${r.id}">Edit</button>
+        <button class="btn btn--danger" type="button" data-del="${r.id}">Delete</button>
       </div>
     </div>`;
 
@@ -499,6 +512,10 @@ function openSheet(id) {
 els.sheetBody.addEventListener("click", (e) => {
   const save = e.target.closest("[data-save]");
   if (save) return toggleSaved(save.dataset.save);
+  const edit = e.target.closest("[data-edit]");
+  if (edit) return openForm(state.all.find((x) => x.id === edit.dataset.edit));
+  const del = e.target.closest("[data-del]");
+  if (del) return deleteRestaurant(del.dataset.del);
   const share = e.target.closest("[data-share]");
   if (share) {
     const r = state.all.find((x) => x.id === share.dataset.share);
@@ -518,6 +535,102 @@ els.sheetBody.addEventListener("click", (e) => {
 els.sheet.addEventListener("click", (e) => {
   if (e.target === els.sheet) els.sheet.close();
 });
+
+
+/* ---------------- add / edit / delete ---------------- */
+
+async function request(method, url, body) {
+  const res = await fetch(url, {
+    method,
+    headers: body ? { "Content-Type": "application/json" } : undefined,
+    body: body ? JSON.stringify(body) : undefined,
+  });
+  const data = res.status === 204 ? null : await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error((data && data.error) || "Request failed. Is the server running?");
+  return data;
+}
+
+function refreshAfterChange() {
+  if (state.town && !state.all.some((r) => r.town === state.town)) state.town = "";
+  if (state.category && !state.all.some((r) => r.category === state.category)) state.category = "";
+  buildChips();
+  render();
+}
+
+let editingId = null;
+function openForm(r) {
+  editingId = r ? r.id : null;
+  $("formTitle").textContent = r ? "Edit restaurant" : "Add a restaurant";
+  $("restForm").reset();
+  $("formError").textContent = "";
+  if (r) {
+    $("fName").value = r.name;
+    $("fTown").value = r.town;
+    $("fCategory").value = r.category;
+    $("fSignature").value = r.signature || "";
+    $("fBlurb").value = r.blurb || "";
+    $("fHeat").value = r.heat;
+    $("fPrice").value = r.price;
+    $("fOpen").value = r.open;
+    $("fClose").value = r.close;
+    $("fDishes").value = r.dishes.map((d) => `${d.name} | ${d.note}`).join("\n");
+  }
+  $("formDialog").showModal();
+  $("fName").focus();
+}
+
+async function deleteRestaurant(id) {
+  const r = state.all.find((x) => x.id === id);
+  if (!r || !confirm(`Delete ${r.name}? This cannot be undone.`)) return;
+  try {
+    await request("DELETE", `/api/restaurants/${encodeURIComponent(id)}`);
+  } catch (err) {
+    return toast(err.message);
+  }
+  state.all = state.all.filter((x) => x.id !== id);
+  state.saved.delete(id);
+  try { localStorage.setItem("mt-saved", JSON.stringify([...state.saved])); } catch (e) { /* ignore */ }
+  els.sheet.close();
+  refreshAfterChange();
+  toast(`Deleted ${r.name}`);
+}
+
+function setupFormEvents() {
+  $("fCategory").innerHTML = Object.entries(CATEGORIES).map(([k, v]) => `<option value="${k}">${esc(v.label)}</option>`).join("");
+  $("addBtn").addEventListener("click", () => openForm(null));
+  $("group").addEventListener("change", (e) => {
+    state.group = e.target.value;
+    render();
+  });
+  $("restForm").addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const dishes = $("fDishes").value.split("\n").map((l) => l.trim()).filter(Boolean).map((l) => {
+      const [name, ...note] = l.split("|");
+      return { name: name.trim(), note: note.join("|").trim() };
+    });
+    const body = {
+      name: $("fName").value.trim(), town: $("fTown").value.trim(), category: $("fCategory").value,
+      signature: $("fSignature").value.trim(), blurb: $("fBlurb").value.trim(),
+      heat: Number($("fHeat").value), price: Number($("fPrice").value),
+      open: $("fOpen").value, close: $("fClose").value, dishes,
+    };
+    $("formSubmit").disabled = true;
+    try {
+      const saved = editingId
+        ? await request("PUT", `/api/restaurants/${encodeURIComponent(editingId)}`, body)
+        : await request("POST", "/api/restaurants", body);
+      state.all = editingId ? state.all.map((x) => (x.id === editingId ? saved : x)) : [...state.all, saved];
+      $("formDialog").close();
+      refreshAfterChange();
+      if (els.sheet.open) openSheet(saved.id);
+      toast(editingId ? `Updated ${saved.name}` : `Added ${saved.name}`);
+    } catch (err) {
+      $("formError").textContent = err.message;
+    } finally {
+      $("formSubmit").disabled = false;
+    }
+  });
+}
 
 /* ---------------- data + init ---------------- */
 
@@ -550,6 +663,7 @@ async function init() {
 
   loadSaved();
   setupFilterEvents();
+  setupFormEvents();
 
   try {
     state.all = await loadRestaurants();

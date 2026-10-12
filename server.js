@@ -14,7 +14,7 @@ const Restaurant = require("./models/Restaurant");
 const app = express();
 const PORT = process.env.PORT || 3000;
 const MONGODB_URI = process.env.MONGODB_URI || "mongodb://127.0.0.1:27017/mangan-tamu";
-const ADMIN_KEY = process.env.ADMIN_KEY || "";
+
 
 const PUBLIC_DIR = path.join(__dirname, "public");
 
@@ -41,10 +41,14 @@ if (!hasPublicIndex) {
 /* ---------- helpers ---------- */
 const escapeRegex = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 
-function requireAdmin(req, res, next) {
-  if (!ADMIN_KEY) return res.status(403).json({ error: "Write routes are disabled (no ADMIN_KEY set)" });
-  if (req.get("x-admin-key") !== ADMIN_KEY) return res.status(401).json({ error: "Invalid admin key" });
-  next();
+const FIELDS = ["name", "town", "category", "signature", "blurb", "heat", "price", "open", "close", "dishes"];
+const pick = (b = {}) => Object.fromEntries(FIELDS.filter((k) => k in b).map((k) => [k, b[k]]));
+
+async function newId(name) {
+  const base = String(name || "").toLowerCase().normalize("NFKD").replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "") || "restaurant";
+  let id = base, n = 2;
+  while (await Restaurant.exists({ id })) id = `${base}-${n++}`;
+  return id;
 }
 
 const wrap = (fn) => (req, res) =>
@@ -88,18 +92,16 @@ app.get(
 
 app.post(
   "/api/restaurants",
-  requireAdmin,
   wrap(async (req, res) => {
-    const doc = await Restaurant.create(req.body);
+    const doc = await Restaurant.create({ ...pick(req.body), id: await newId(req.body && req.body.name) });
     res.status(201).json(doc);
   })
 );
 
 app.put(
   "/api/restaurants/:id",
-  requireAdmin,
   wrap(async (req, res) => {
-    const doc = await Restaurant.findOneAndUpdate({ id: String(req.params.id) }, req.body, {
+    const doc = await Restaurant.findOneAndUpdate({ id: String(req.params.id) }, pick(req.body), {
       new: true,
       runValidators: true,
     });
@@ -110,7 +112,6 @@ app.put(
 
 app.delete(
   "/api/restaurants/:id",
-  requireAdmin,
   wrap(async (req, res) => {
     const doc = await Restaurant.findOneAndDelete({ id: String(req.params.id) });
     if (!doc) return res.status(404).json({ error: "Not found" });

@@ -1120,3 +1120,17 @@ button {
     transition-duration: 0.001ms !important;
   }
 }
+
+/* ---------- grouping + add/edit form ---------- */
+.group__title { grid-column: 1 / -1; margin-top: 1rem; padding-bottom: 0.4rem; border-bottom: 2px solid var(--uling); font-size: 1.4rem; }
+.group__title:first-child { margin-top: 0; }
+.btn--dark { border-color: var(--uling); }
+.formsheet { width: min(100% - 1.5rem, 34rem); }
+.restform { display: grid; gap: 0.8rem; padding: 2rem 1.6rem 1.6rem; }
+.restform h2 { font-size: 1.8rem; }
+.restform label { display: grid; gap: 0.25rem; font-family: var(--display); font-weight: 600; font-size: 0.95rem; }
+.restform small { font-weight: 400; color: var(--ink-soft); }
+.restform input, .restform select, .restform textarea { padding: 0.6rem 0.9rem; border: 2px solid var(--uling); border-radius: 14px; background: #fff; font: 1rem var(--text); }
+.restform__row { display: grid; grid-template-columns: 1fr 1fr; gap: 0.8rem; }
+.restform__error { min-height: 1.2rem; color: var(--sili); font-weight: 600; }
+.btn--danger { background: transparent; color: var(--sili); border-color: var(--sili); }
