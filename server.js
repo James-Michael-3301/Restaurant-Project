@@ -41,7 +41,7 @@ if (!hasPublicIndex) {
 /* ---------- helpers ---------- */
 const escapeRegex = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 
-const FIELDS = ["name", "town", "category", "signature", "blurb", "heat", "price", "open", "close", "dishes"];
+const FIELDS = ["name", "town", "category", "signature", "blurb", "heat", "price", "open", "close", "dishes", "scores"];
 const pick = (b = {}) => Object.fromEntries(FIELDS.filter((k) => k in b).map((k) => [k, b[k]]));
 
 async function newId(name) {
@@ -78,6 +78,34 @@ app.get(
 
     const list = await Restaurant.find(filter).sort({ name: 1 }).lean({ virtuals: false });
     res.json(list.map(({ _id, ...rest }) => rest));
+  })
+);
+
+// GET /api/restaurants/top?min=90
+// Aggregate: sum every restaurant's scores, keep totals greater than the threshold.
+app.get(
+  "/api/restaurants/top",
+  wrap(async (req, res) => {
+    const min = Number(req.query.min);
+    const threshold = Number.isFinite(min) ? min : 90;
+    const rows = await Restaurant.aggregate([
+      { $unwind: "$scores" },
+      {
+        $group: {
+          _id: "$id",
+          name: { $first: "$name" },
+          town: { $first: "$town" },
+          category: { $first: "$category" },
+          totalScore: { $sum: "$scores.score" },
+          avgScore: { $avg: "$scores.score" },
+          reviews: { $sum: 1 },
+          grades: { $push: "$scores.grade" },
+        },
+      },
+      { $match: { totalScore: { $gt: threshold } } },
+      { $sort: { totalScore: -1, name: 1 } },
+    ]);
+    res.json(rows.map(({ _id, ...rest }) => ({ id: _id, ...rest })));
   })
 );
 

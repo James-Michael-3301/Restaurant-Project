@@ -500,8 +500,6 @@ function openSheet(id) {
       <div class="sheet__actions">
         <button class="btn btn--leaf btn--save" type="button" data-save="${r.id}" aria-pressed="${saved}">${saved ? "Saved" : "Save this place"}</button>
         <button class="btn btn--outline" type="button" data-share="${r.id}">Copy name and town</button>
-        <button class="btn btn--outline" type="button" data-edit="${r.id}">Edit</button>
-        <button class="btn btn--danger" type="button" data-del="${r.id}">Delete</button>
       </div>
     </div>`;
 
@@ -512,10 +510,6 @@ function openSheet(id) {
 els.sheetBody.addEventListener("click", (e) => {
   const save = e.target.closest("[data-save]");
   if (save) return toggleSaved(save.dataset.save);
-  const edit = e.target.closest("[data-edit]");
-  if (edit) return openForm(state.all.find((x) => x.id === edit.dataset.edit));
-  const del = e.target.closest("[data-del]");
-  if (del) return deleteRestaurant(del.dataset.del);
   const share = e.target.closest("[data-share]");
   if (share) {
     const r = state.all.find((x) => x.id === share.dataset.share);
@@ -537,98 +531,68 @@ els.sheet.addEventListener("click", (e) => {
 });
 
 
-/* ---------------- add / edit / delete ---------------- */
 
-async function request(method, url, body) {
-  const res = await fetch(url, {
-    method,
-    headers: body ? { "Content-Type": "application/json" } : undefined,
-    body: body ? JSON.stringify(body) : undefined,
-  });
-  const data = res.status === 204 ? null : await res.json().catch(() => ({}));
-  if (!res.ok) throw new Error((data && data.error) || "Request failed. Is the server running?");
-  return data;
-}
-
-function refreshAfterChange() {
-  if (state.town && !state.all.some((r) => r.town === state.town)) state.town = "";
-  if (state.category && !state.all.some((r) => r.category === state.category)) state.category = "";
-  buildChips();
-  render();
-}
-
-let editingId = null;
-function openForm(r) {
-  editingId = r ? r.id : null;
-  $("formTitle").textContent = r ? "Edit restaurant" : "Add a restaurant";
-  $("restForm").reset();
-  $("formError").textContent = "";
-  if (r) {
-    $("fName").value = r.name;
-    $("fTown").value = r.town;
-    $("fCategory").value = r.category;
-    $("fSignature").value = r.signature || "";
-    $("fBlurb").value = r.blurb || "";
-    $("fHeat").value = r.heat;
-    $("fPrice").value = r.price;
-    $("fOpen").value = r.open;
-    $("fClose").value = r.close;
-    $("fDishes").value = r.dishes.map((d) => `${d.name} | ${d.note}`).join("\n");
-  }
-  $("formDialog").showModal();
-  $("fName").focus();
-}
-
-async function deleteRestaurant(id) {
-  const r = state.all.find((x) => x.id === id);
-  if (!r || !confirm(`Delete ${r.name}? This cannot be undone.`)) return;
-  try {
-    await request("DELETE", `/api/restaurants/${encodeURIComponent(id)}`);
-  } catch (err) {
-    return toast(err.message);
-  }
-  state.all = state.all.filter((x) => x.id !== id);
-  state.saved.delete(id);
-  try { localStorage.setItem("mt-saved", JSON.stringify([...state.saved])); } catch (e) { /* ignore */ }
-  els.sheet.close();
-  refreshAfterChange();
-  toast(`Deleted ${r.name}`);
-}
-
-function setupFormEvents() {
-  $("fCategory").innerHTML = Object.entries(CATEGORIES).map(([k, v]) => `<option value="${k}">${esc(v.label)}</option>`).join("");
-  $("addBtn").addEventListener("click", () => openForm(null));
+function setupGroupEvents() {
   $("group").addEventListener("change", (e) => {
     state.group = e.target.value;
     render();
   });
-  $("restForm").addEventListener("submit", async (e) => {
-    e.preventDefault();
-    const dishes = $("fDishes").value.split("\n").map((l) => l.trim()).filter(Boolean).map((l) => {
-      const [name, ...note] = l.split("|");
-      return { name: name.trim(), note: note.join("|").trim() };
-    });
-    const body = {
-      name: $("fName").value.trim(), town: $("fTown").value.trim(), category: $("fCategory").value,
-      signature: $("fSignature").value.trim(), blurb: $("fBlurb").value.trim(),
-      heat: Number($("fHeat").value), price: Number($("fPrice").value),
-      open: $("fOpen").value, close: $("fClose").value, dishes,
-    };
-    $("formSubmit").disabled = true;
-    try {
-      const saved = editingId
-        ? await request("PUT", `/api/restaurants/${encodeURIComponent(editingId)}`, body)
-        : await request("POST", "/api/restaurants", body);
-      state.all = editingId ? state.all.map((x) => (x.id === editingId ? saved : x)) : [...state.all, saved];
-      $("formDialog").close();
-      refreshAfterChange();
-      if (els.sheet.open) openSheet(saved.id);
-      toast(editingId ? `Updated ${saved.name}` : `Added ${saved.name}`);
-    } catch (err) {
-      $("formError").textContent = err.message;
-    } finally {
-      $("formSubmit").disabled = false;
-    }
+}
+
+
+/* ---------------- best quality (aggregate scores > 90) ---------------- */
+
+let bestRows = [];
+
+// Mirrors the server's $group/$match pipeline for when the API is unavailable.
+function localTop(list, min) {
+  return list
+    .map((r) => {
+      const s = r.scores || [];
+      return { id: r.id, name: r.name, town: r.town, category: r.category, reviews: s.length, grades: s.map((x) => x.grade), totalScore: s.reduce((a, x) => a + x.score, 0) };
+    })
+    .filter((r) => r.reviews && r.totalScore > min)
+    .sort((a, b) => b.totalScore - a.totalScore || a.name.localeCompare(b.name));
+}
+
+function renderBest() {
+  const q = $("bestSearch").value.trim().toLowerCase();
+  const rows = bestRows.filter((r) => !q || [r.name, r.town, CATEGORIES[r.category].label].join(" ").toLowerCase().includes(q));
+  $("bestBody").innerHTML =
+    rows
+      .map(
+        (r) => `<tr>
+          <td><button class="best__name" type="button" data-best="${esc(r.id)}">${esc(r.name)}</button></td>
+          <td>${esc(r.town)}</td>
+          <td>${esc(CATEGORIES[r.category].label)}</td>
+          <td>${esc(r.grades.join(" "))}</td>
+          <td class="best__score">${r.totalScore}</td></tr>`
+      )
+      .join("") || '<tr><td colspan="5">No restaurants match.</td></tr>';
+  $("bestCount").textContent = `${rows.length} restaurants with a total score above 90`;
+}
+
+async function openBest() {
+  try {
+    const res = await fetch("/api/restaurants/top?min=90");
+    if (!res.ok) throw new Error();
+    bestRows = await res.json();
+  } catch (e) {
+    bestRows = localTop(state.all, 90);
+  }
+  $("bestSearch").value = "";
+  renderBest();
+  $("bestDialog").showModal();
+}
+
+function setupBestEvents() {
+  $("bestBtn").addEventListener("click", openBest);
+  $("bestSearch").addEventListener("input", renderBest);
+  $("bestBody").addEventListener("click", (e) => {
+    const b = e.target.closest("[data-best]");
+    if (!b) return;
+    $("bestDialog").close();
+    openSheet(b.dataset.best);
   });
 }
 
@@ -663,7 +627,8 @@ async function init() {
 
   loadSaved();
   setupFilterEvents();
-  setupFormEvents();
+  setupGroupEvents();
+  setupBestEvents();
 
   try {
     state.all = await loadRestaurants();
