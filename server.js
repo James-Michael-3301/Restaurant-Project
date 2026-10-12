@@ -1,37 +1,134 @@
-// Small Express server. Restaurants come from public/data/restaurants.json,
-// so no database is needed. The same file is also fetched directly by the
-// front end if /api is unavailable (e.g. when you use Live Server).
+require("dotenv").config();
+
+// Some networks/ISPs refuse the DNS SRV lookup that mongodb+srv:// needs
+// (error: querySrv ECONNREFUSED). Set DNS_SERVERS in .env to work around it.
+if (process.env.DNS_SERVERS) {
+  require("node:dns").setServers(process.env.DNS_SERVERS.split(",").map((s) => s.trim()));
+}
 const express = require("express");
 const fs = require("fs");
 const path = require("path");
+const mongoose = require("mongoose");
+const Restaurant = require("./models/Restaurant");
 
 const app = express();
 const PORT = process.env.PORT || 3000;
-const DATA_FILE = path.join(__dirname, "public", "data", "restaurants.json");
+const MONGODB_URI = process.env.MONGODB_URI || "mongodb://127.0.0.1:27017/mangan-tamu";
+const ADMIN_KEY = process.env.ADMIN_KEY || "";
 
-app.use(express.json());
-app.use(express.static(path.join(__dirname, "public")));
+const PUBLIC_DIR = path.join(__dirname, "public");
 
-app.get("/api/restaurants", (req, res) => {
-  try {
-    const { town, category, q } = req.query;
-    let list = JSON.parse(fs.readFileSync(DATA_FILE, "utf8"));
+app.use(express.json({ limit: "100kb" }));
 
-    if (town) list = list.filter((r) => r.town === town);
-    if (category) list = list.filter((r) => r.category === category);
-    if (q) {
-      const needle = String(q).toLowerCase();
-      list = list.filter((r) =>
-        JSON.stringify(r).toLowerCase().includes(needle)
-      );
-    }
-    res.json(list);
-  } catch (error) {
-    console.error(error);
-    res.status(500).json({ error: "Unable to retrieve restaurants" });
+/* ---------- static front end ----------
+   Preferred layout: index.html, style.css, script.js and data/ inside public/.
+   Fallback: if they sit next to server.js, serve just those three files
+   (never the whole folder, so .env and server.js stay private). */
+app.use(express.static(PUBLIC_DIR));
+
+const hasPublicIndex = fs.existsSync(path.join(PUBLIC_DIR, "index.html"));
+if (!hasPublicIndex) {
+  console.warn("public/index.html not found. Serving front-end files from the project root instead.");
+  console.warn("Tip: move index.html, style.css and script.js into a public/ folder.");
+  for (const file of ["index.html", "style.css", "script.js"]) {
+    const full = path.join(__dirname, file);
+    app.get(file === "index.html" ? ["/", "/index.html"] : "/" + file, (req, res) =>
+      fs.existsSync(full) ? res.sendFile(full) : res.status(404).send(`${file} not found`)
+    );
   }
-});
+}
 
-app.listen(PORT, () => {
-  console.log(`Mangan Tamu running at http://localhost:${PORT}`);
-});
+/* ---------- helpers ---------- */
+const escapeRegex = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+
+function requireAdmin(req, res, next) {
+  if (!ADMIN_KEY) return res.status(403).json({ error: "Write routes are disabled (no ADMIN_KEY set)" });
+  if (req.get("x-admin-key") !== ADMIN_KEY) return res.status(401).json({ error: "Invalid admin key" });
+  next();
+}
+
+const wrap = (fn) => (req, res) =>
+  Promise.resolve(fn(req, res)).catch((err) => {
+    if (err.name === "ValidationError") return res.status(400).json({ error: err.message });
+    if (err.code === 11000) return res.status(409).json({ error: "A restaurant with that id already exists" });
+    console.error(err);
+    res.status(500).json({ error: "Server error" });
+  });
+
+/* ---------- API ---------- */
+
+// GET /api/restaurants?town=Angeles&category=grill&heat=2&q=sisig
+app.get(
+  "/api/restaurants",
+  wrap(async (req, res) => {
+    const filter = {};
+    // String() stops query-operator injection such as ?town[$ne]=x
+    if (req.query.town) filter.town = String(req.query.town);
+    if (req.query.category) filter.category = String(req.query.category);
+    if (req.query.heat !== undefined && req.query.heat !== "") filter.heat = Number(req.query.heat);
+
+    if (req.query.q) {
+      const rx = new RegExp(escapeRegex(String(req.query.q)), "i");
+      filter.$or = [{ name: rx }, { town: rx }, { signature: rx }, { blurb: rx }, { "dishes.name": rx }, { "dishes.note": rx }];
+    }
+
+    const list = await Restaurant.find(filter).sort({ name: 1 }).lean({ virtuals: false });
+    res.json(list.map(({ _id, ...rest }) => rest));
+  })
+);
+
+app.get(
+  "/api/restaurants/:id",
+  wrap(async (req, res) => {
+    const doc = await Restaurant.findOne({ id: String(req.params.id) });
+    if (!doc) return res.status(404).json({ error: "Not found" });
+    res.json(doc);
+  })
+);
+
+app.post(
+  "/api/restaurants",
+  requireAdmin,
+  wrap(async (req, res) => {
+    const doc = await Restaurant.create(req.body);
+    res.status(201).json(doc);
+  })
+);
+
+app.put(
+  "/api/restaurants/:id",
+  requireAdmin,
+  wrap(async (req, res) => {
+    const doc = await Restaurant.findOneAndUpdate({ id: String(req.params.id) }, req.body, {
+      new: true,
+      runValidators: true,
+    });
+    if (!doc) return res.status(404).json({ error: "Not found" });
+    res.json(doc);
+  })
+);
+
+app.delete(
+  "/api/restaurants/:id",
+  requireAdmin,
+  wrap(async (req, res) => {
+    const doc = await Restaurant.findOneAndDelete({ id: String(req.params.id) });
+    if (!doc) return res.status(404).json({ error: "Not found" });
+    res.status(204).end();
+  })
+);
+
+// unknown /api routes get JSON instead of the HTML "Cannot GET" page
+app.use("/api", (req, res) => res.status(404).json({ error: "Unknown API route" }));
+
+/* ---------- start ---------- */
+mongoose
+  .connect(MONGODB_URI)
+  .then(() => {
+    console.log("Connected to MongoDB");
+    app.listen(PORT, () => console.log(`Mangan Tamu running at http://localhost:${PORT}`));
+  })
+  .catch((err) => {
+    console.error("Could not connect to MongoDB:", err.message);
+    process.exit(1);
+  });
